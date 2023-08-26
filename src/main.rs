@@ -5,8 +5,9 @@ use ropey::Rope;
 use dashmap::DashMap;
 use std::collections::HashMap;
 
-use cpoint_lsp_server::semantic_token::LEGEND_TYPE;
+use cpoint_lsp_server::semantic_token::{LEGEND_TYPE, semantic_token_from_ast};
 use cpoint_lsp_server::parser::{parse, Func, ImCompleteSemanticToken};
+use cpoint_lsp_server::completion::completion;
 
 #[derive(Debug)]
 struct Backend {
@@ -132,11 +133,91 @@ impl LanguageServer for Backend {
     }*/
 
     async fn semantic_tokens_range(&self, params: SemanticTokensRangeParams) -> Result<Option<SemanticTokensRangeResult>> {
-        let _uri = params.text_document.uri.to_string();
+        let uri = params.text_document.uri.to_string();
+        let semantic_tokens = || -> Option<Vec<SemanticToken>> {
+            let im_complete_tokens = self.semantic_token_map.get(&uri)?;
+            let rope = self.document_map.get(&uri)?;
+            let mut pre_line = 0;
+            let mut pre_start = 0;
+            let semantic_tokens = im_complete_tokens
+                .iter()
+                .filter_map(|token| {
+                    let line = rope.try_byte_to_line(token.start).ok()? as u32;
+                    let first = rope.try_line_to_char(line as usize).ok()? as u32;
+                    let start = rope.try_byte_to_char(token.start).ok()? as u32 - first;
+                    let ret = Some(SemanticToken {
+                        delta_line: line - pre_line,
+                        delta_start: if start >= pre_start {
+                            start - pre_start
+                        } else {
+                            start
+                        },
+                        length: token.length as u32,
+                        token_type: token.token_type as u32,
+                        token_modifiers_bitset: 0,
+                    });
+                    pre_line = line;
+                    pre_start = start;
+                    ret
+                })
+                .collect::<Vec<_>>();
+            Some(semantic_tokens)
+        }();
+        if let Some(semantic_token) = semantic_tokens {
+            return Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: semantic_token,
+            })));
+        }
         Ok(None)
     }
 
-    async fn semantic_tokens_full(&self, _params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
+    async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri.to_string();
+        self.client
+            .log_message(MessageType::LOG, "semantic_token_full")
+            .await;
+        let semantic_tokens = || -> Option<Vec<SemanticToken>> {
+            let mut im_complete_tokens = self.semantic_token_map.get_mut(&uri)?;
+            let rope = self.document_map.get(&uri)?;
+            let ast = self.ast_map.get(&uri)?;
+            let extends_tokens = semantic_token_from_ast(&ast);
+            im_complete_tokens.extend(extends_tokens);
+            im_complete_tokens.sort_by(|a, b| a.start.cmp(&b.start));
+            let mut pre_line = 0;
+            let mut pre_start = 0;
+            let semantic_tokens = im_complete_tokens
+                .iter()
+                .filter_map(|token| {
+                    let line = rope.try_byte_to_line(token.start).ok()? as u32;
+                    let first = rope.try_line_to_char(line as usize).ok()? as u32;
+                    let start = rope.try_byte_to_char(token.start).ok()? as u32 - first;
+                    let delta_line = line - pre_line;
+                    let delta_start = if delta_line == 0 {
+                        start - pre_start
+                    } else {
+                        start
+                    };
+                    let ret = Some(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length: token.length as u32,
+                        token_type: token.token_type as u32,
+                        token_modifiers_bitset: 0,
+                    });
+                    pre_line = line;
+                    pre_start = start;
+                    ret
+                })
+                .collect::<Vec<_>>();
+            Some(semantic_tokens)
+        }();
+        if let Some(semantic_token) = semantic_tokens {
+            return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: semantic_token,
+            })));
+        }
         Ok(None)
     }
 
@@ -151,13 +232,63 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "completion")
             .await;
-        let _uri = params.text_document_position.text_document.uri;
-        let _position = params.text_document_position.position;
-        Ok(None)
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let completions = || -> Option<Vec<CompletionItem>> {
+            let rope = self.document_map.get(&uri.to_string())?;
+            let ast = self.ast_map.get(&uri.to_string())?;
+            let char = rope.try_line_to_char(position.line as usize).ok()?;
+            let offset = char + position.character as usize;
+            let completions = completion(&ast, offset);
+            let mut ret = Vec::with_capacity(completions.len());
+            for (_, item) in completions {
+                match item {
+                    cpoint_lsp_server::completion::ImCompleteCompletionItem::Variable(var) => {
+                        ret.push(CompletionItem {
+                            label: var.clone(),
+                            insert_text: Some(var.clone()),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(var),
+                            ..Default::default()
+                        });
+                    }
+                    cpoint_lsp_server::completion::ImCompleteCompletionItem::Function(
+                        name,
+                        args,
+                    ) => {
+                        ret.push(CompletionItem {
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(name.clone()),
+                            insert_text: Some(format!(
+                                "{}({})",
+                                name,
+                                args.iter()
+                                    .enumerate()
+                                    .map(|(index, item)| { format!("${{{}:{}}}", index + 1, item) })
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )),
+                            insert_text_format: Some(InsertTextFormat::SNIPPET),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            Some(ret)
+        }();
+        Ok(completions.map(CompletionResponse::Array))
     }
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
+}
+
+fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
+    let line = rope.try_char_to_line(offset).ok()?;
+    let first_char_of_line = rope.try_line_to_char(line).ok()?;
+    let column = offset - first_char_of_line;
+    Some(Position::new(line as u32, column as u32))
 }
 
 impl Backend {
@@ -165,10 +296,67 @@ impl Backend {
         let rope = ropey::Rope::from_str(&params.text);
         self.document_map
             .insert(params.uri.to_string(), rope.clone());
-        let (ast, _errors, _semantic_tokens) = parse(&params.text);
+        let (ast, errors, semantic_tokens) = parse(&params.text);
+        // TODO : readd this after fixing errors
+        /*let diagnostics = errors
+            .into_iter()
+            .filter_map(|item| {
+                let (message, span) = match item.reason() {
+                    chumsky::error::SimpleReason::Unclosed { span, delimiter } => {
+                        (format!("Unclosed delimiter {}", delimiter), span.clone())
+                    }
+                    chumsky::error::SimpleReason::Unexpected => (
+                        format!(
+                            "{}, expected {}",
+                            if item.found().is_some() {
+                                "Unexpected token in input"
+                            } else {
+                                "Unexpected end of input"
+                            },
+                            if item.expected().len() == 0 {
+                                "something else".to_string()
+                            } else {
+                                item.expected()
+                                    .map(|expected| match expected {
+                                        Some(expected) => expected.to_string(),
+                                        None => "end of input".to_string(),
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        ),
+                        item.span(),
+                    ),
+                    chumsky::error::SimpleReason::Custom(msg) => (msg.to_string(), item.span()),
+                };
+
+                
+                || -> Option<Diagnostic> {
+                    // let start_line = rope.try_char_to_line(span.start)?;
+                    // let first_char = rope.try_line_to_char(start_line)?;
+                    // let start_column = span.start - first_char;
+                    let start_position = offset_to_position(span.start, &rope)?;
+                    let end_position = offset_to_position(span.end, &rope)?;
+                    // let end_line = rope.try_char_to_line(span.end)?;
+                    // let first_char = rope.try_line_to_char(end_line)?;
+                    // let end_column = span.end - first_char;
+                    Some(Diagnostic::new_simple(
+                        Range::new(start_position, end_position),
+                        message,
+                    ))
+                }()
+            })
+            .collect::<Vec<_>>();
+
+        self.client
+            .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
+            .await;*/
+        
         if let Some(ast) = ast {
             self.ast_map.insert(params.uri.to_string(), ast);
         }
+        self.semantic_token_map
+            .insert(params.uri.to_string(), semantic_tokens);
     }
 }
 

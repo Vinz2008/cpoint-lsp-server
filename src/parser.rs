@@ -1,6 +1,7 @@
 use chumsky::{prelude::*, stream::Stream};
 use std::collections::HashMap;
 use tower_lsp::lsp_types::SemanticTokenType;
+use std::fmt;
 
 use crate::semantic_token::LEGEND_TYPE;
 
@@ -30,6 +31,29 @@ pub enum Token {
     Else,
     For,
     While,
+    Import,
+}
+
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Token::Null => write!(f, "null"),
+            Token::Bool(x) => write!(f, "{}", x),
+            Token::Num(n) => write!(f, "{}", n),
+            Token::Str(s) => write!(f, "{}", s),
+            Token::Operator(s) => write!(f, "{}", s),
+            Token::ControlChar(c) => write!(f, "{}", c),
+            Token::Identifier(s) => write!(f, "{}", s),
+            Token::Func => write!(f, "func"),
+            Token::Var => write!(f, "var"),
+            Token::If => write!(f, "if"),
+            Token::Else => write!(f, "else"),
+            Token::For => write!(f, "for"),
+            Token::While => write!(f, "while"),
+            Token::Import => write!(f, "import"),
+        }
+    }
 }
 
 fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
@@ -60,6 +84,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         "true" => Token::Bool(true),
         "false" => Token::Bool(false),
         "null" => Token::Null,
+        "import" => Token::Import,
         _ => Token::Identifier(ident),
     });
 
@@ -120,9 +145,196 @@ pub struct Func {
     pub span: Span,
 }
 
-/*fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + Clone {
+fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + Clone {
     recursive(|expr| {
+        let raw_expr = recursive(|raw_expr| {
+            let val = filter_map(|span, tok| match tok {
+                Token::Null => Ok(Expr::Value(Value::Null)),
+                Token::Bool(x) => Ok(Expr::Value(Value::Bool(x))),
+                Token::Num(n) => Ok(Expr::Value(Value::Num(n.parse().unwrap()))),
+                Token::Str(s) => Ok(Expr::Value(Value::Str(s))),
+                _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
+            })
+            .labelled("value");
 
+            let ident = filter_map(|span, tok| match tok {
+                Token::Identifier(ident) => Ok((ident, span)),
+                _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
+            })
+            .labelled("identifier");
+
+            // A list of expressions
+            let items = expr
+                .clone()
+                .chain(just(Token::ControlChar(',')).ignore_then(expr.clone()).repeated())
+                .then_ignore(just(Token::ControlChar(',')).or_not())
+                .or_not()
+                .map(|item| item.unwrap_or_default());
+
+            // A let expression
+            let let_ = just(Token::Var)
+                .ignore_then(ident)
+                .then_ignore(just(Token::Operator("=".to_string())))
+                .then(raw_expr)
+                .then(expr.clone())
+                .map(|((name, val), body)| {
+                    Expr::Var(name.0, Box::new(val), Box::new(body), name.1)
+                });
+
+            let list = items
+                .clone()
+                .delimited_by(just(Token::ControlChar('[')), just(Token::ControlChar(']')))
+                .map(Expr::List);
+
+            // 'Atoms' are expressions that contain no ambiguity
+            let atom = val
+                .or(ident.map(Expr::Local))
+                .or(let_)
+                .or(list)
+                .map_with_span(|expr, span| (expr, span))
+                // Atoms can also just be normal expressions, but surrounded with parentheses
+                .or(expr
+                    .clone()
+                    .delimited_by(just(Token::ControlChar('(')), just(Token::ControlChar(')'))))
+                // Attempt to recover anything that looks like a parenthesised expression but contains errors
+                .recover_with(nested_delimiters(
+                    Token::ControlChar('('),
+                    Token::ControlChar(')'),
+                    [
+                        (Token::ControlChar('['), Token::ControlChar(']')),
+                        (Token::ControlChar('{'), Token::ControlChar('}')),
+                    ],
+                    |span| (Expr::Error, span),
+                ))
+                // Attempt to recover anything that looks like a list but contains errors
+                .recover_with(nested_delimiters(
+                    Token::ControlChar('['),
+                    Token::ControlChar(']'),
+                    [
+                        (Token::ControlChar('('), Token::ControlChar(')')),
+                        (Token::ControlChar('{'), Token::ControlChar('}')),
+                    ],
+                    |span| (Expr::Error, span),
+                ));
+
+            // Function calls have very high precedence so we prioritise them
+            let call = atom
+                .then(
+                    items
+                        .delimited_by(just(Token::ControlChar('(')), just(Token::ControlChar(')')))
+                        .map_with_span(|args, span| (args, span))
+                        .repeated(),
+                )
+                .foldl(|f, args| {
+                    let span = f.1.start..args.1.end;
+                    (Expr::Call(Box::new(f), args), span)
+                });
+
+            // Product ops (multiply and divide) have equal precedence
+            let op = just(Token::Operator("*".to_string()))
+                .to(BinaryOp::Mul)
+                .or(just(Token::Operator("/".to_string())).to(BinaryOp::Div));
+            let product = call
+                .clone()
+                .then(op.then(call).repeated())
+                .foldl(|a, (op, b)| {
+                    let span = a.1.start..b.1.end;
+                    (Expr::Binary(Box::new(a), op, Box::new(b)), span)
+                });
+
+            // Sum ops (add and subtract) have equal precedence
+            let op = just(Token::Operator("+".to_string()))
+                .to(BinaryOp::Add)
+                .or(just(Token::Operator("-".to_string())).to(BinaryOp::Sub));
+            let sum = product
+                .clone()
+                .then(op.then(product).repeated())
+                .foldl(|a, (op, b)| {
+                    let span = a.1.start..b.1.end;
+                    (Expr::Binary(Box::new(a), op, Box::new(b)), span)
+                });
+
+            // Comparison ops (equal, not-equal) have equal precedence
+            let op = just(Token::Operator("==".to_string()))
+                .to(BinaryOp::Eq)
+                .or(just(Token::Operator("!=".to_string())).to(BinaryOp::NotEq));
+
+            sum.clone()
+                .then(op.then(sum).repeated())
+                .foldl(|a, (op, b)| {
+                    let span = a.1.start..b.1.end;
+                    (Expr::Binary(Box::new(a), op, Box::new(b)), span)
+                })
+        });
+
+        // Blocks are expressions but delimited with braces
+        let block = expr
+            .clone()
+            .delimited_by(just(Token::ControlChar('{')), just(Token::ControlChar('}')))
+            // Attempt to recover anything that looks like a block but contains errors
+            .recover_with(nested_delimiters(
+                Token::ControlChar('{'),
+                Token::ControlChar('}'),
+                [
+                    (Token::ControlChar('('), Token::ControlChar(')')),
+                    (Token::ControlChar('['), Token::ControlChar(']')),
+                ],
+                |span| (Expr::Error, span),
+            ));
+
+        let if_ = recursive(|if_| {
+            just(Token::If)
+                .ignore_then(expr.clone())
+                .then(block.clone())
+                .then(
+                    just(Token::Else)
+                        .ignore_then(block.clone().or(if_))
+                        .or_not(),
+                )
+                .map_with_span(|((cond, a), b), span| {
+                    (
+                        Expr::If(
+                            Box::new(cond),
+                            Box::new(a),
+                            Box::new(match b {
+                                Some(b) => b,
+                                // If an `if` expression has no trailing `else` block, we magic up one that just produces null
+                                None => (Expr::Value(Value::Null), span.clone()),
+                            }),
+                        ),
+                        span,
+                    )
+                })
+        });
+
+        // Both blocks and `if` are 'block expressions' and can appear in the place of statements
+        let block_expr = block.or(if_).labelled("block");
+
+        let block_chain = block_expr
+            .clone()
+            .then(block_expr.clone().repeated())
+            .foldl(|a, b| {
+                let span = a.1.start..b.1.end;
+                (Expr::Then(Box::new(a), Box::new(b)), span)
+            });
+
+        block_chain
+            // Expressions, chained by semicolons, are statements
+            .or(raw_expr.clone())
+            .then(just(Token::ControlChar(';')).ignore_then(expr.or_not()).repeated())
+            .foldl(|a, b| {
+                let span = a.1.clone(); // TODO: Not correct
+                (
+                    Expr::Then(
+                        Box::new(a),
+                        Box::new(match b {
+                            Some(b) => b,
+                            None => (Expr::Value(Value::Null), span.clone()),
+                        }),
+                    ),
+                    span,
+                )
+            })
     })
 }
 
@@ -185,7 +397,7 @@ func.repeated()
         Ok(funcs)
     })
     .then_ignore(end())
-}*/
+}
 
 pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, Vec<ImCompleteSemanticToken>) {
     let (tokens, errs) = lexer().parse_recovery(src);
@@ -238,6 +450,15 @@ pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, 
                         .position(|item| item == &SemanticTokenType::KEYWORD)
                         .unwrap(),
                 }),
+                // TODO : maybe add a semantic token for top level keywords
+                Token::Import => Some(ImCompleteSemanticToken {
+                    start: span.start,
+                    length: span.len(),
+                    token_type: LEGEND_TYPE
+                        .iter()
+                        .position(|item| item == &SemanticTokenType::KEYWORD)
+                        .unwrap(),
+                }),
                 Token::If => Some(ImCompleteSemanticToken {
                     start: span.start,
                     length: span.len(),
@@ -273,13 +494,21 @@ pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, 
             })
             .collect::<Vec<_>>();
         let len = src.chars().count();
-        /*let (ast, parse_errs) =
-            funcs_parser().parse_recovery(Stream::from_iter(len..len + 1, tokens.into_iter()));*/
-        let ast: Option<HashMap<String, Func>> = None;
-        let parse_errs : Vec<Simple<Token>> = vec![];
+        let (ast, parse_errs) =
+            funcs_parser().parse_recovery(Stream::from_iter(len..len + 1, tokens.into_iter()));
         (ast, parse_errs, semantic_tokens)
     } else {
         (None, Vec::new(), vec![])
     };
-    (None, vec![], vec![])
+    let parse_errors = errs
+        .into_iter()
+        .map(|e| e.map(|c| c.to_string()))
+        .chain(
+            tokenize_errors
+                .into_iter()
+                .map(|e| e.map(|tok| tok.to_string())),
+        )
+        .collect::<Vec<_>>();
+
+    (ast, parse_errors, semantic_tokens)
 }
