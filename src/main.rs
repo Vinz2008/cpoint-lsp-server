@@ -1,12 +1,19 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use ropey::Rope;
+use dashmap::DashMap;
+use std::collections::HashMap;
 
 use cpoint_lsp_server::semantic_token::LEGEND_TYPE;
+use cpoint_lsp_server::parser::{parse, Func, ImCompleteSemanticToken};
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
+    document_map: DashMap<String, Rope>,
+    ast_map: DashMap<String, HashMap<String, Func>>,
+    semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>>,
 }
 
 #[tower_lsp::async_trait]
@@ -74,16 +81,30 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn did_open(&self, _params: DidOpenTextDocumentParams) {
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.client
             .log_message(MessageType::INFO, "file opened!")
             .await;
+        self.on_change(TextDocumentItem {
+            uri: params.text_document.uri,
+            text: params.text_document.text,
+            version: params.text_document.version,
+            language_id: params.text_document.language_id, 
+        })
+        .await
     }
 
-    async fn did_change(&self, mut _params: DidChangeTextDocumentParams){
+    async fn did_change(&self, mut params: DidChangeTextDocumentParams){
         self.client
             .log_message(MessageType::INFO, "File changed")
             .await;
+        self.on_change(TextDocumentItem {
+            uri: params.text_document.uri,
+            text: std::mem::take(&mut params.content_changes[0].text),
+            version: params.text_document.version,
+            language_id: "cpoint".to_string()
+        })
+        .await
     }
 
     async fn did_save(&self, _: DidSaveTextDocumentParams) {
@@ -126,14 +147,28 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         self.client
             .log_message(MessageType::INFO, "completion")
             .await;
+        let _uri = params.text_document_position.text_document.uri;
+        let _position = params.text_document_position.position;
         Ok(None)
     }
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl Backend {
+    async fn on_change(&self, params: TextDocumentItem){
+        let rope = ropey::Rope::from_str(&params.text);
+        self.document_map
+            .insert(params.uri.to_string(), rope.clone());
+        let (ast, _errors, _semantic_tokens) = parse(&params.text);
+        if let Some(ast) = ast {
+            self.ast_map.insert(params.uri.to_string(), ast);
+        }
     }
 }
 
@@ -145,7 +180,10 @@ async fn main() {
     /*let (service, socket) = LspService::new(|client| Backend { client });
     Server::new(stdin, stdout, socket).serve(service).await;*/
     let (service, socket) = LspService::build(|client| Backend {
-        client
+        client,
+        document_map: DashMap::new(),
+        ast_map: DashMap::new(),
+        semantic_token_map: DashMap::new()
     }).finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 
