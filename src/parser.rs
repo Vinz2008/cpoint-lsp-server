@@ -1,7 +1,8 @@
+use chumsky::error::Cheap;
 use chumsky::{prelude::*, stream::Stream};
 use std::collections::HashMap;
-use tower_lsp::lsp_types::SemanticTokenType;
 use std::fmt;
+use tower_lsp::lsp_types::SemanticTokenType;
 
 use crate::semantic_token::LEGEND_TYPE;
 
@@ -34,7 +35,6 @@ pub enum Token {
     Import,
 }
 
-
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -61,7 +61,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .chain::<char, _, _>(just('.').chain(text::digits(10)).or_not().flatten())
         .collect::<String>()
         .map(Token::Num);
-    
+
     let str_ = just('"')
         .ignore_then(filter(|c| *c != '"').repeated())
         .then_ignore(just('"'))
@@ -136,12 +136,24 @@ pub enum Expr {
     If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
 }
 
+#[derive(Debug)]
+pub enum TopLevelExpr {
+    Function(Func),
+    Import(Import),
+}
+
 // A function node in the AST.
 #[derive(Debug)]
 pub struct Func {
     pub args: Vec<Spanned<String>>,
     pub body: Spanned<Expr>,
     pub name: Spanned<String>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct Import {
+    pub path: Spanned<String>,
     pub span: Span,
 }
 
@@ -166,7 +178,11 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
             // A list of expressions
             let items = expr
                 .clone()
-                .chain(just(Token::ControlChar(',')).ignore_then(expr.clone()).repeated())
+                .chain(
+                    just(Token::ControlChar(','))
+                        .ignore_then(expr.clone())
+                        .repeated(),
+                )
                 .then_ignore(just(Token::ControlChar(',')).or_not())
                 .or_not()
                 .map(|item| item.unwrap_or_default());
@@ -321,7 +337,11 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
         block_chain
             // Expressions, chained by semicolons, are statements
             .or(raw_expr.clone())
-            .then(just(Token::ControlChar(';')).ignore_then(expr.or_not()).repeated())
+            .then(
+                just(Token::ControlChar(';'))
+                    .ignore_then(expr.or_not())
+                    .repeated(),
+            )
             .foldl(|a, b| {
                 let span = a.1.clone(); // TODO: Not correct
                 (
@@ -338,6 +358,89 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
     })
 }
 
+pub fn toplevel_parser(
+) -> impl Parser<Token, HashMap<String, TopLevelExpr>, Error = Simple<Token>> + Clone {
+    //let tokens = choice::<_, Simple<char>>(()).padded().repeated();
+    //tokens
+    //let ident = text::ident().padded();
+    let ident = filter_map(|span, tok| match tok {
+        Token::Identifier(ident) => Ok(ident),
+        _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
+    });
+
+    let path_filter = one_of::<_, _, Cheap<char>>("./")
+        .or(any())
+        .repeated()
+        .at_least(1)
+        .then_ignore(end());
+    /*let import_parser = just(Token::Import)
+    .ignore_then(
+        /*filter(|c| *c != nextline())*/
+        path_filter
+        .map_with_span(|path, span| (path, span)).labelled("import path")
+    )
+    .map_with_span(|path, span| (path.clone(), TopLevelExpr::Import(Import { path, span })))
+    .labelled("import");*/
+    let args = ident
+        .map_with_span(|name, span| (name, span))
+        .separated_by(just(Token::ControlChar(',')))
+        .allow_trailing()
+        .delimited_by(just(Token::ControlChar('(')), just(Token::ControlChar(')')))
+        .labelled("function args");
+    let func_parser = just(Token::Func)
+        .ignore_then(
+            ident
+                .map_with_span(|name, span| (name, span))
+                .labelled("function name"),
+        )
+        .then(args)
+        .then(
+            expr_parser()
+                .delimited_by(just(Token::ControlChar('{')), just(Token::ControlChar('}')))
+                // Attempt to recover anything that looks like a function body but contains errors
+                .recover_with(nested_delimiters(
+                    Token::ControlChar('{'),
+                    Token::ControlChar('}'),
+                    [
+                        (Token::ControlChar('('), Token::ControlChar(')')),
+                        (Token::ControlChar('['), Token::ControlChar(']')),
+                    ],
+                    |span| (Expr::Error, span),
+                )),
+        )
+        .map_with_span(|((name, args), body), span| {
+            (
+                name.clone(),
+                TopLevelExpr::Function(Func {
+                    args,
+                    body,
+                    name,
+                    span,
+                }),
+            )
+        })
+        .labelled("function");
+
+    func_parser
+        .repeated()
+        .try_map(|fs, _| {
+            let mut funcs = HashMap::new();
+            for ((name, name_span), f) in fs {
+                if funcs.insert(name.clone(), f).is_some() {
+                    return Err(Simple::custom(
+                        name_span,
+                        format!("Function '{}' already exists", name),
+                    ));
+                }
+            }
+            Ok(funcs)
+        })
+        .then_ignore(end())
+    /*let r#import =
+    let top_level_exp = r#import.or(r#fn).padded();
+    top_level_exp*/
+}
+
 pub fn funcs_parser() -> impl Parser<Token, HashMap<String, Func>, Error = Simple<Token>> + Clone {
     let ident = filter_map(|span, tok| match tok {
         Token::Identifier(ident) => Ok(ident),
@@ -351,55 +454,61 @@ pub fn funcs_parser() -> impl Parser<Token, HashMap<String, Func>, Error = Simpl
         .labelled("function args");
     let func = just(Token::Func)
         .ignore_then(
-        ident
-            .map_with_span(|name, span| (name, span))
-            .labelled("function name"),
-    )
-    .then(args)
-    .then(
-        expr_parser()
-            .delimited_by(just(Token::ControlChar('{')), just(Token::ControlChar('}')))
-            // Attempt to recover anything that looks like a function body but contains errors
-            .recover_with(nested_delimiters(
-                Token::ControlChar('{'),
-                Token::ControlChar('}'),
-                [
-                    (Token::ControlChar('('), Token::ControlChar(')')),
-                    (Token::ControlChar('['), Token::ControlChar(']')),
-                ],
-                |span| (Expr::Error, span),
-            )),
-    )
-    .map_with_span(|((name, args), body), span| {
-        (
-            name.clone(),
-            Func {
-                args,
-                body,
-                name,
-                span,
-            },
+            ident
+                .map_with_span(|name, span| (name, span))
+                .labelled("function name"),
         )
-    })
-    .labelled("function");
+        .then(args)
+        .then(
+            expr_parser()
+                .delimited_by(just(Token::ControlChar('{')), just(Token::ControlChar('}')))
+                // Attempt to recover anything that looks like a function body but contains errors
+                .recover_with(nested_delimiters(
+                    Token::ControlChar('{'),
+                    Token::ControlChar('}'),
+                    [
+                        (Token::ControlChar('('), Token::ControlChar(')')),
+                        (Token::ControlChar('['), Token::ControlChar(']')),
+                    ],
+                    |span| (Expr::Error, span),
+                )),
+        )
+        .map_with_span(|((name, args), body), span| {
+            (
+                name.clone(),
+                Func {
+                    args,
+                    body,
+                    name,
+                    span,
+                },
+            )
+        })
+        .labelled("function");
 
-func.repeated()
-    .try_map(|fs, _| {
-        let mut funcs = HashMap::new();
-        for ((name, name_span), f) in fs {
-            if funcs.insert(name.clone(), f).is_some() {
-                return Err(Simple::custom(
-                    name_span,
-                    format!("Function '{}' already exists", name),
-                ));
+    func.repeated()
+        .try_map(|fs, _| {
+            let mut funcs = HashMap::new();
+            for ((name, name_span), f) in fs {
+                if funcs.insert(name.clone(), f).is_some() {
+                    return Err(Simple::custom(
+                        name_span,
+                        format!("Function '{}' already exists", name),
+                    ));
+                }
             }
-        }
-        Ok(funcs)
-    })
-    .then_ignore(end())
+            Ok(funcs)
+        })
+        .then_ignore(end())
 }
 
-pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, Vec<ImCompleteSemanticToken>) {
+pub fn parse(
+    src: &str,
+) -> (
+    Option<HashMap<String, /*Func*/ TopLevelExpr>>,
+    Vec<Simple<String>>,
+    Vec<ImCompleteSemanticToken>,
+) {
     let (tokens, errs) = lexer().parse_recovery(src);
     let (ast, tokenize_errors, semantic_tokens) = if let Some(tokens) = tokens {
         let semantic_tokens = tokens
@@ -467,21 +576,21 @@ pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, 
                         .position(|item| item == &SemanticTokenType::KEYWORD)
                         .unwrap(),
                 }),
-                Token::For => Some(ImCompleteSemanticToken { 
-                    start: span.start, 
-                    length: span.len(), 
+                Token::For => Some(ImCompleteSemanticToken {
+                    start: span.start,
+                    length: span.len(),
                     token_type: LEGEND_TYPE
                         .iter()
                         .position(|item| item == &SemanticTokenType::KEYWORD)
-                        .unwrap(), 
+                        .unwrap(),
                 }),
-                Token::While => Some(ImCompleteSemanticToken { 
-                    start: span.start, 
-                    length: span.len(), 
+                Token::While => Some(ImCompleteSemanticToken {
+                    start: span.start,
+                    length: span.len(),
                     token_type: LEGEND_TYPE
                         .iter()
                         .position(|item| item == &SemanticTokenType::KEYWORD)
-                        .unwrap(), 
+                        .unwrap(),
                 }),
                 Token::Else => Some(ImCompleteSemanticToken {
                     start: span.start,
@@ -495,7 +604,7 @@ pub fn parse(src: &str) -> (Option<HashMap<String, Func>>, Vec<Simple<String>>, 
             .collect::<Vec<_>>();
         let len = src.chars().count();
         let (ast, parse_errs) =
-            funcs_parser().parse_recovery(Stream::from_iter(len..len + 1, tokens.into_iter()));
+            /*funcs_parser()*/ toplevel_parser().parse_recovery(Stream::from_iter(len..len + 1, tokens.into_iter()));
         (ast, parse_errs, semantic_tokens)
     } else {
         (None, Vec::new(), vec![])

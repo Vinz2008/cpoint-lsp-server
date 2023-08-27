@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::parser::{Expr, Func, Spanned};
+use crate::parser::{Expr, Func, Spanned, TopLevelExpr};
 
 pub enum ImCompleteCompletionItem {
     Variable(String),
@@ -8,33 +8,44 @@ pub enum ImCompleteCompletionItem {
 }
 
 pub fn completion(
-    ast: &HashMap<String, Func>,
+    ast: &HashMap<String, /*Func*/ TopLevelExpr>,
     ident_offset: usize,
 ) -> HashMap<String, ImCompleteCompletionItem> {
     let mut map = HashMap::new();
-    for (_, v) in ast.iter() {
-        if v.name.1.end < ident_offset {
-            map.insert(
-                v.name.0.clone(),
-                ImCompleteCompletionItem::Function(
-                    v.name.0.clone(),
-                    v.args.clone().into_iter().map(|(name, _)| name).collect(),
-                ),
-            );
+    let mut is_function: bool = false;
+    for (_, t) in ast.iter() {
+        match t {
+            TopLevelExpr::Function(v) => {
+                if v.name.1.end < ident_offset {
+                    map.insert(
+                        v.name.0.clone(),
+                        ImCompleteCompletionItem::Function(
+                            v.name.0.clone(),
+                            v.args.clone().into_iter().map(|(name, _)| name).collect(),
+                        ),
+                    );
+                }
+                is_function = true;
+            }
+            // insert there a way to interpret other cases (for example imports)
+            _ => {}
         }
     }
-
-    // collect params variable
-    for (_, v) in ast.iter() {
-        if v.span.end > ident_offset && v.span.start < ident_offset {
-            // log::debug!("this is completion from body {}", name);
-            v.args.iter().for_each(|(item, _)| {
-                map.insert(
-                    item.clone(),
-                    ImCompleteCompletionItem::Variable(item.clone()),
-                );
-            });
-            get_completion_of(&v.body, &mut map, ident_offset);
+    if is_function {
+        // collect params variable
+        for (_, t) in ast.iter() {
+            if let TopLevelExpr::Function(v) = t {
+                if v.span.end > ident_offset && v.span.start < ident_offset {
+                    // log::debug!("this is completion from body {}", name);
+                    v.args.iter().for_each(|(item, _)| {
+                        map.insert(
+                            item.clone(),
+                            ImCompleteCompletionItem::Variable(item.clone()),
+                        );
+                    });
+                    get_completion_of(&v.body, &mut map, ident_offset);
+                }
+            }
         }
     }
     map
@@ -51,9 +62,7 @@ pub fn get_completion_of(
         // Expr::List(exprs) => exprs
         //     .iter()
         //     .for_each(|expr| get_definition(expr, definition_ass_list)),
-        Expr::Local(local) => {
-            !(ident_offset >= local.1.start && ident_offset < local.1.end)
-        }
+        Expr::Local(local) => !(ident_offset >= local.1.start && ident_offset < local.1.end),
         Expr::Var(name, lhs, rest, _name_span) => {
             definition_map.insert(
                 name.clone(),

@@ -1,6 +1,6 @@
+use crate::parser::{Expr, Func, ImCompleteSemanticToken, Import, Spanned, TopLevelExpr};
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{SemanticTokenType};
-use crate::parser::{Expr, Func, ImCompleteSemanticToken, Spanned};
+use tower_lsp::lsp_types::SemanticTokenType;
 
 pub const LEGEND_TYPE: &[SemanticTokenType] = &[
     SemanticTokenType::FUNCTION,
@@ -13,11 +13,49 @@ pub const LEGEND_TYPE: &[SemanticTokenType] = &[
     SemanticTokenType::PARAMETER,
 ];
 
-pub fn semantic_token_from_ast(ast: &HashMap<String, Func>) -> Vec<ImCompleteSemanticToken> {
-    let mut semantic_tokens = vec![];
+fn semantic_token_from_ast_function(
+    semantic_tokens: &mut Vec<ImCompleteSemanticToken>,
+    function: &Func,
+    _func_name: &String,
+) {
+    function.args.iter().for_each(|(_, span)| {
+        semantic_tokens.push(ImCompleteSemanticToken {
+            start: span.start,
+            length: span.len(),
+            token_type: LEGEND_TYPE
+                .iter()
+                .position(|item| item == &SemanticTokenType::PARAMETER)
+                .unwrap(),
+        });
+    });
+    let (_, span) = &function.name;
+    semantic_tokens.push(ImCompleteSemanticToken {
+        start: span.start,
+        length: span.len(),
+        token_type: LEGEND_TYPE
+            .iter()
+            .position(|item| item == &SemanticTokenType::FUNCTION)
+            .unwrap(),
+    });
+    semantic_token_from_expr(&function.body, semantic_tokens);
+}
 
-    ast.iter().for_each(|(_func_name, function)| {
-        function.args.iter().for_each(|(_, span)| {
+fn semantic_token_from_ast_import(imp: &Import) {}
+
+pub fn semantic_token_from_ast(
+    ast: &HashMap<String, /*Func*/ TopLevelExpr>,
+) -> Vec<ImCompleteSemanticToken> {
+    let mut semantic_tokens: Vec<ImCompleteSemanticToken> = vec![];
+
+    ast.iter().for_each(|(_func_name, top_level_expr)| {
+        match top_level_expr {
+            TopLevelExpr::Function(func) => {
+                semantic_token_from_ast_function(&mut semantic_tokens, func, _func_name)
+            }
+            TopLevelExpr::Import(imp) => semantic_token_from_ast_import(imp),
+        }
+
+        /*function.args.iter().for_each(|(_, span)| {
             semantic_tokens.push(ImCompleteSemanticToken {
                 start: span.start,
                 length: span.len(),
@@ -36,7 +74,7 @@ pub fn semantic_token_from_ast(ast: &HashMap<String, Func>) -> Vec<ImCompleteSem
                 .position(|item| item == &SemanticTokenType::FUNCTION)
                 .unwrap(),
         });
-        semantic_token_from_expr(&function.body, &mut semantic_tokens);
+        semantic_token_from_expr(&function.body, &mut semantic_tokens);*/
     });
 
     semantic_tokens

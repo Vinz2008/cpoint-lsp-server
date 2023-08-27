@@ -1,19 +1,19 @@
+use dashmap::DashMap;
+use ropey::Rope;
+use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use ropey::Rope;
-use dashmap::DashMap;
-use std::collections::HashMap;
 
-use cpoint_lsp_server::semantic_token::{LEGEND_TYPE, semantic_token_from_ast};
-use cpoint_lsp_server::parser::{parse, Func, ImCompleteSemanticToken};
 use cpoint_lsp_server::completion::completion;
+use cpoint_lsp_server::parser::{parse, Func, ImCompleteSemanticToken, TopLevelExpr};
+use cpoint_lsp_server::semantic_token::{semantic_token_from_ast, LEGEND_TYPE};
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
     document_map: DashMap<String, Rope>,
-    ast_map: DashMap<String, HashMap<String, Func>>,
+    ast_map: DashMap<String, HashMap<String, /*Func*/ TopLevelExpr>>,
     semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>>,
 }
 
@@ -44,35 +44,35 @@ impl LanguageServer for Backend {
                     file_operations: None,
                 }),
                 semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(SemanticTokensRegistrationOptions {
-                        text_document_registration_options: {
-                            TextDocumentRegistrationOptions {
-                                document_selector: Some(vec![DocumentFilter {
-                                    language: Some("cpoint".to_string()),
-                                    scheme: Some("file".to_string()),
-                                    pattern: None,
-                                }]),
-                            }
-                        },
-                        semantic_tokens_options: SemanticTokensOptions {
-                            work_done_progress_options: WorkDoneProgressOptions::default(),
-                            legend: SemanticTokensLegend {
-                                token_types: LEGEND_TYPE.into(),
-                                token_modifiers: vec![],
+                    SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                        SemanticTokensRegistrationOptions {
+                            text_document_registration_options: {
+                                TextDocumentRegistrationOptions {
+                                    document_selector: Some(vec![DocumentFilter {
+                                        language: Some("cpoint".to_string()),
+                                        scheme: Some("file".to_string()),
+                                        pattern: None,
+                                    }]),
+                                }
                             },
-                            range: Some(true),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            semantic_tokens_options: SemanticTokensOptions {
+                                work_done_progress_options: WorkDoneProgressOptions::default(),
+                                legend: SemanticTokensLegend {
+                                    token_types: LEGEND_TYPE.into(),
+                                    token_modifiers: vec![],
+                                },
+                                range: Some(true),
+                                full: Some(SemanticTokensFullOptions::Bool(true)),
+                            },
+                            static_registration_options: StaticRegistrationOptions::default(),
                         },
-                        static_registration_options: StaticRegistrationOptions::default(),
-                    }
-                    )
+                    ),
                 ),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
-            }
-            
+            },
         })
     }
 
@@ -90,12 +90,12 @@ impl LanguageServer for Backend {
             uri: params.text_document.uri,
             text: params.text_document.text,
             version: params.text_document.version,
-            language_id: params.text_document.language_id, 
+            language_id: params.text_document.language_id,
         })
         .await
     }
 
-    async fn did_change(&self, mut params: DidChangeTextDocumentParams){
+    async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
         self.client
             .log_message(MessageType::INFO, "File changed")
             .await;
@@ -103,7 +103,7 @@ impl LanguageServer for Backend {
             uri: params.text_document.uri,
             text: std::mem::take(&mut params.content_changes[0].text),
             version: params.text_document.version,
-            language_id: "cpoint".to_string()
+            language_id: "cpoint".to_string(),
         })
         .await
     }
@@ -132,7 +132,10 @@ impl LanguageServer for Backend {
         Ok(definition)
     }*/
 
-    async fn semantic_tokens_range(&self, params: SemanticTokensRangeParams) -> Result<Option<SemanticTokensRangeResult>> {
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
         let uri = params.text_document.uri.to_string();
         let semantic_tokens = || -> Option<Vec<SemanticToken>> {
             let im_complete_tokens = self.semantic_token_map.get(&uri)?;
@@ -172,7 +175,10 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri.to_string();
         self.client
             .log_message(MessageType::LOG, "semantic_token_full")
@@ -221,7 +227,10 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn inlay_hint(&self, _params: tower_lsp::lsp_types::InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(
+        &self,
+        _params: tower_lsp::lsp_types::InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
         self.client
             .log_message(MessageType::INFO, "inlay hint")
             .await;
@@ -292,7 +301,7 @@ fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
 }
 
 impl Backend {
-    async fn on_change(&self, params: TextDocumentItem){
+    async fn on_change(&self, params: TextDocumentItem) {
         let rope = ropey::Rope::from_str(&params.text);
         self.document_map
             .insert(params.uri.to_string(), rope.clone());
@@ -330,7 +339,7 @@ impl Backend {
                     chumsky::error::SimpleReason::Custom(msg) => (msg.to_string(), item.span()),
                 };
 
-                
+
                 || -> Option<Diagnostic> {
                     // let start_line = rope.try_char_to_line(span.start)?;
                     // let first_char = rope.try_line_to_char(start_line)?;
@@ -351,7 +360,7 @@ impl Backend {
         self.client
             .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
             .await;*/
-        
+
         if let Some(ast) = ast {
             self.ast_map.insert(params.uri.to_string(), ast);
         }
@@ -371,9 +380,8 @@ async fn main() {
         client,
         document_map: DashMap::new(),
         ast_map: DashMap::new(),
-        semantic_token_map: DashMap::new()
-    }).finish();
+        semantic_token_map: DashMap::new(),
+    })
+    .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
-
-
 }

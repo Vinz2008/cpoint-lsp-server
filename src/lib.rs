@@ -1,3 +1,3 @@
-pub mod semantic_token;
-pub mod parser;
 pub mod completion;
+pub mod parser;
+pub mod semantic_token;
