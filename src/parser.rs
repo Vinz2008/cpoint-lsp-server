@@ -1,4 +1,5 @@
 use chumsky::error::Cheap;
+use chumsky::text::{newline, ident};
 use chumsky::{prelude::*, stream::Stream};
 use std::collections::HashMap;
 use std::fmt;
@@ -32,7 +33,7 @@ pub enum Token {
     Else,
     For,
     While,
-    Import,
+//    Import,
 }
 
 impl fmt::Display for Token {
@@ -51,7 +52,7 @@ impl fmt::Display for Token {
             Token::Else => write!(f, "else"),
             Token::For => write!(f, "for"),
             Token::While => write!(f, "while"),
-            Token::Import => write!(f, "import"),
+            //Token::Import => write!(f, "import"),
         }
     }
 }
@@ -74,7 +75,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .collect::<String>()
         .map(Token::Operator);
 
-    let ctrl = one_of("()[]{};,").map(Token::ControlChar);
+    let ctrl = one_of("()[]{};,./").map(Token::ControlChar);
 
     let identifier = text::ident().map(|ident: String| match ident.as_str() {
         "func" => Token::Func,
@@ -84,7 +85,9 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         "true" => Token::Bool(true),
         "false" => Token::Bool(false),
         "null" => Token::Null,
-        "import" => Token::Import,
+        "for" => Token::For,
+        "while" => Token::While,
+//        "import" => Token::Import,
         _ => Token::Identifier(ident),
     });
 
@@ -95,8 +98,10 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .or(identifier)
         .recover_with(skip_then_retry_until([]));
     let comment = just("//").then(take_until(just('\n'))).padded();
+    //let import = just("import").then(take_until(just('\n')));
     token
         .padded_by(comment.repeated())
+        //.padded_by(import.repeated())
         .map_with_span(|tok, span| (tok, span))
         .padded()
         .repeated()
@@ -134,6 +139,7 @@ pub enum Expr {
     Binary(Box<Spanned<Self>>, BinaryOp, Box<Spanned<Self>>),
     Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
     If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
+//    For(Box<Spanned<Self>>, Box<Spanned<Self>>)
 }
 
 #[derive(Debug)]
@@ -188,7 +194,7 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
                 .map(|item| item.unwrap_or_default());
 
             // A let expression
-            let let_ = just(Token::Var)
+            let var_ = just(Token::Var)
                 .ignore_then(ident)
                 .then_ignore(just(Token::Operator("=".to_string())))
                 .then(raw_expr)
@@ -205,7 +211,7 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
             // 'Atoms' are expressions that contain no ambiguity
             let atom = val
                 .or(ident.map(Expr::Local))
-                .or(let_)
+                .or(var_)
                 .or(list)
                 .map_with_span(|expr, span| (expr, span))
                 // Atoms can also just be normal expressions, but surrounded with parentheses
@@ -271,7 +277,7 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
                 });
 
             // Comparison ops (equal, not-equal) have equal precedence
-            let op = just(Token::Operator("==".to_string()))
+            let op: chumsky::combinator::Or<chumsky::combinator::To<chumsky::primitive::Just<Token, Token, _>, Token, BinaryOp>, chumsky::combinator::To<chumsky::primitive::Just<Token, Token, _>, Token, BinaryOp>> = just(Token::Operator("==".to_string()))
                 .to(BinaryOp::Eq)
                 .or(just(Token::Operator("!=".to_string())).to(BinaryOp::NotEq));
 
@@ -282,7 +288,22 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
                     (Expr::Binary(Box::new(a), op, Box::new(b)), span)
                 })
         });
+        /*let ident = filter_map(|span, tok| match tok {
+            Token::Identifier(ident) => Ok((ident, span)),
+            _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
+        })
+        .labelled("identifier");*/
 
+        let items = expr
+            .clone()
+            .chain(
+                just(Token::ControlChar(','))
+                    .ignore_then(expr.clone())
+                    .repeated(),
+            )
+            .then_ignore(just(Token::ControlChar(',')).or_not())
+            .or_not()
+            .map(|item| item.unwrap_or_default());
         // Blocks are expressions but delimited with braces
         let block = expr
             .clone()
@@ -323,8 +344,20 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
                 })
         });
 
+        /*let for_ = recursive(|for_| {
+            just(Token::For)
+            .then(items)
+            .map_with_span(|expr, span| (expr, span))
+            .separated_by(just(Token::ControlChar(',')))
+            .allow_trailing()
+            .then(block.clone())
+            .map_with_span(|(items, a), span|{
+                (Expr::For(Box::New(items), a), span)
+            })
+        });*/
+
         // Both blocks and `if` are 'block expressions' and can appear in the place of statements
-        let block_expr = block.or(if_).labelled("block");
+        let block_expr = block.or(if_)/*.or(for_)*/.labelled("block");
 
         let block_chain = block_expr
             .clone()
@@ -367,19 +400,28 @@ pub fn toplevel_parser(
         Token::Identifier(ident) => Ok(ident),
         _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
     });
-
-    let path_filter = one_of::<_, _, Cheap<char>>("./")
+    /*let path_filter = recursive(|path| {
+        choice((just(Token::ControlChar('.')), just(Token::ControlChar('/'))))
+        .repeated()
+    }).collect();*/
+    /*let path_filter = one_of::<_, _, Cheap<char>>("./")
         .or(any())
         .repeated()
-        .at_least(1)
-        .then_ignore(end());
+        .at_least(1).labelled("path");*/
     /*let import_parser = just(Token::Import)
     .ignore_then(
         /*filter(|c| *c != nextline())*/
         path_filter
         .map_with_span(|path, span| (path, span)).labelled("import path")
     )
-    .map_with_span(|path, span| (path.clone(), TopLevelExpr::Import(Import { path, span })))
+    .map_with_span(|path_tok: Vec<Token>, span| {
+        let path : (std::string::String, std::ops::Range<usize>) = ("".to_string(), 0..0);
+        for t in path_tok {
+
+        }
+         (path.clone(), TopLevelExpr::Import(Import { path, span }))
+
+    })
     .labelled("import");*/
     let args = ident
         .map_with_span(|name, span| (name, span))
@@ -560,14 +602,14 @@ pub fn parse(
                         .unwrap(),
                 }),
                 // TODO : maybe add a semantic token for top level keywords
-                Token::Import => Some(ImCompleteSemanticToken {
+                /*Token::Import => Some(ImCompleteSemanticToken {
                     start: span.start,
                     length: span.len(),
                     token_type: LEGEND_TYPE
                         .iter()
                         .position(|item| item == &SemanticTokenType::KEYWORD)
                         .unwrap(),
-                }),
+                }),*/
                 Token::If => Some(ImCompleteSemanticToken {
                     start: span.start,
                     length: span.len(),
