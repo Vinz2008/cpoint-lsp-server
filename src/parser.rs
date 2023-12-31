@@ -1,8 +1,8 @@
-use chumsky::error::Cheap;
-use chumsky::text::{newline, ident};
-use chumsky::{prelude::*, stream::Stream};
+//use chumsky::text::{newline, ident};
+use chumsky::prelude::*;
+use chumsky::stream::Stream;
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self,};
 use tower_lsp::lsp_types::SemanticTokenType;
 
 use crate::semantic_token::LEGEND_TYPE;
@@ -64,7 +64,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .map(Token::Num);
 
     let str_ = just('"')
-        .ignore_then(filter(|c| *c != '"').repeated())
+        .ignore_then(none_of('"').repeated())
         .then_ignore(just('"'))
         .collect::<String>()
         .map(Token::Str);
@@ -76,7 +76,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .map(Token::Operator);
 
     let ctrl = one_of("()[]{};,./").map(Token::ControlChar);
-
+    let import = just::<_, _, Simple<char>>("import").then(take_until(just('\n'))).padded();
     let identifier = text::ident().map(|ident: String| match ident.as_str() {
         "func" => Token::Func,
         "var" => Token::Var,
@@ -90,18 +90,23 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
 //        "import" => Token::Import,
         _ => Token::Identifier(ident),
     });
-
+    let comment = just("//").ignore_then(none_of("\n").repeated().ignored());
     let token = num
         .or(str_)
         .or(op)
         .or(ctrl)
+        //.or(comment)
+        //.padded_by(import)
         .or(identifier)
         .recover_with(skip_then_retry_until([]));
-    let comment = just("//").then(take_until(just('\n'))).padded();
+    //let comment = just("//").then(just('\n').not().repeated().at_least(1)).padded();
+    //let comment = just("//").then(take_until(just('\n'))).padded();
+    //let import = just("import").then(take_until(just('\n'))).padded();
     //let import = just("import").then(take_until(just('\n')));
     token
-        .padded_by(comment.repeated())
+        //.padded_by(comment.repeated())
         //.padded_by(import.repeated())
+        .padded_by(comment.repeated())
         .map_with_span(|tok, span| (tok, span))
         .padded()
         .repeated()

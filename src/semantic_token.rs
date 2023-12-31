@@ -40,7 +40,7 @@ fn semantic_token_from_ast_function(
     semantic_token_from_expr(&function.body, semantic_tokens);
 }
 
-fn semantic_token_from_ast_import(imp: &Import) {}
+fn semantic_token_from_ast_import(_imp: &Import) {}
 
 pub fn semantic_token_from_ast(
     ast: &HashMap<String, /*Func*/ TopLevelExpr>,

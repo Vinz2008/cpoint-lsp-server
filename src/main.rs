@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use cpoint_lsp_server::completion::completion;
-use cpoint_lsp_server::parser::{parse, Func, ImCompleteSemanticToken, TopLevelExpr};
+use cpoint_lsp_server::parser::{parse, ImCompleteSemanticToken, TopLevelExpr};
 use cpoint_lsp_server::semantic_token::{semantic_token_from_ast, LEGEND_TYPE};
 
 #[derive(Debug)]
@@ -307,7 +307,7 @@ impl Backend {
             .insert(params.uri.to_string(), rope.clone());
         let (ast, errors, semantic_tokens) = parse(&params.text);
         // TODO : readd this after fixing errors
-        /*let diagnostics = errors
+        let diagnostics = errors
             .into_iter()
             .filter_map(|item| {
                 let (message, span) = match item.reason() {
@@ -359,7 +359,7 @@ impl Backend {
 
         self.client
             .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
-            .await;*/
+            .await;
 
         if let Some(ast) = ast {
             self.ast_map.insert(params.uri.to_string(), ast);

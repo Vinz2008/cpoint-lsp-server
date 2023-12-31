@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::parser::{Expr, Func, Spanned, TopLevelExpr};
+use crate::parser::{Expr, Spanned, TopLevelExpr};
 
 pub enum ImCompleteCompletionItem {
     Variable(String),
